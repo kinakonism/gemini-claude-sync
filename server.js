@@ -1,16 +1,45 @@
-// server.js (双方向対応版)
+// server.js (双方向対応版 + Claude自動実行)
 import http from 'http';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
+import { spawn } from 'child_process';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PORT = 3000;
 const GEMINI_TO_CLAUDE_FILE = join(__dirname, 'gemini_ctx.md');
 const CLAUDE_TO_GEMINI_FILE = join(__dirname, 'claude_out.md');
+const STATUS_FILE = join(__dirname, '.claude_status');
+
+function runClaude(prompt) {
+  fs.writeFileSync(STATUS_FILE, 'running', 'utf8');
+  console.log('[Claude] 実行開始...');
+
+  const claude = spawn('claude', [
+    '-p', prompt,
+    '--allowedTools', 'Bash,Read,Write,Edit,Glob,Grep',
+    '--dangerously-skip-permissions',
+  ], {
+    env: process.env,
+    cwd: __dirname,
+  });
+
+  let output = '';
+  claude.stdout.on('data', (data) => { output += data.toString(); });
+  claude.stderr.on('data', (data) => { console.error('[Claude stderr]', data.toString()); });
+
+  claude.on('close', (code) => {
+    fs.writeFileSync(STATUS_FILE, 'done', 'utf8');
+    if (code === 0 && output.trim()) {
+      fs.writeFileSync(CLAUDE_TO_GEMINI_FILE, output, 'utf8');
+      console.log('[Claude] 完了。claude_out.md に書き出しました。');
+    } else {
+      console.error(`[Claude] 終了コード: ${code}`);
+    }
+  });
+}
 
 const server = http.createServer((req, res) => {
-  // CORSの設定（Web版Geminiからのリクエストを許可）
   res.setHeader('Access-Control-Allow-Origin', 'https://gemini.google.com');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
@@ -21,7 +50,7 @@ const server = http.createServer((req, res) => {
     return;
   }
 
-  // 【Gemini ➔ Claude】ブラウザのボタンを押して、会話をローカルに保存
+  // 【Gemini ➔ Claude】受信 → 即200返却 → バックグラウンドでClaude実行
   if (req.method === 'POST') {
     let body = '';
     req.on('data', chunk => { body += chunk.toString(); });
@@ -30,30 +59,42 @@ const server = http.createServer((req, res) => {
         const data = JSON.parse(body);
         const content = `### Gemini Context (${new Date().toLocaleString()})\n\n${data.text}\n`;
         fs.writeFileSync(GEMINI_TO_CLAUDE_FILE, content, 'utf8');
-        
-        console.log(`[Success] Geminiの文脈を ${GEMINI_TO_CLAUDE_FILE} に同期しました。`);
+
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ status: 'ok' }));
+
+        runClaude(data.text);
+        console.log('[Success] Geminiの指示を受信。Claudeを起動しました。');
       } catch (err) {
         res.writeHead(400).end();
       }
     });
-  } 
-  
-  // 【Claude ➔ Gemini】ブラウザのボタンを押して、Claudeの成果を入力欄に吸い上げる
-  else if (req.method === 'GET') {
+  }
+
+  // 【Claude ➔ Gemini】claude_out.md の内容を返す
+  else if (req.method === 'GET' && req.url === '/') {
     try {
-      if (fs.existsSync(CLAUDE_TO_GEMINI_FILE)) {
-        const content = fs.readFileSync(CLAUDE_TO_GEMINI_FILE, 'utf8');
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ text: content }));
-      } else {
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ text: "Claudeからの新しいデータはありません。" }));
-      }
-    } catch (err) {
+      const text = fs.existsSync(CLAUDE_TO_GEMINI_FILE)
+        ? fs.readFileSync(CLAUDE_TO_GEMINI_FILE, 'utf8')
+        : 'Claudeからの新しいデータはありません。';
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ text }));
+    } catch {
       res.writeHead(500).end();
     }
+  }
+
+  // 【ステータス確認】Claudeが実行中かどうか
+  else if (req.method === 'GET' && req.url === '/status') {
+    const status = fs.existsSync(STATUS_FILE)
+      ? fs.readFileSync(STATUS_FILE, 'utf8')
+      : 'idle';
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ status }));
+  }
+
+  else {
+    res.writeHead(404).end();
   }
 });
 

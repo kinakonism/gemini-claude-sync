@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         Gemini <-> Claude Code Bi-directional Sync v3.1
+// @name         Gemini <-> Claude Code Bi-directional Sync v4.0
 // @namespace    http://tampermonkey.net/
-// @version      3.1
-// @description  Web版GeminiとClaude Codeの双方向コンテキスト同期
+// @version      4.0
+// @description  Web版GeminiとClaude Codeの双方向コンテキスト同期（Claude自動実行対応）
 // @author       User
 // @match        https://gemini.google.com/*
 // @grant        GM_xmlhttpRequest
@@ -58,7 +58,10 @@
       data: JSON.stringify({ text }),
       onload: (res) => {
         if (res.status === 200) {
-          showToast('✅ Claude Codeに同期しました！', 'success');
+          showToast('⚡ Claude Code 実行中...', 'warning');
+          sendBtn.textContent = '⏳ 処理中...';
+          sendBtn.disabled = true;
+          pollUntilDone();
         } else {
           showToast('❌ 送信失敗: ' + res.status, 'error');
         }
@@ -66,6 +69,41 @@
       onerror: () => showToast('❌ サーバーに接続できません（node server.js は起動中？）', 'error'),
     });
   });
+
+  // Claudeの完了をポーリングして自動受信
+  function pollUntilDone() {
+    const interval = setInterval(() => {
+      GM_xmlhttpRequest({
+        method: 'GET',
+        url: SERVER_URL + '/status',
+        onload: (res) => {
+          if (res.status !== 200) return;
+          const { status } = JSON.parse(res.responseText);
+          if (status === 'done') {
+            clearInterval(interval);
+            sendBtn.textContent = '📤 Gemini → Claude';
+            sendBtn.disabled = false;
+            autoReceive();
+          }
+        },
+      });
+    }, 2000);
+  }
+
+  // 完了後に自動でClaude出力を入力欄にセット
+  function autoReceive() {
+    GM_xmlhttpRequest({
+      method: 'GET',
+      url: SERVER_URL,
+      onload: (res) => {
+        if (res.status === 200) {
+          const data = JSON.parse(res.responseText);
+          setGeminiInput(data.text);
+          showToast('✅ Claudeの回答を入力欄にセットしました！', 'success');
+        }
+      },
+    });
+  }
 
   // 【Claude → Gemini】Claudeの出力を入力欄にセット
   const fetchBtn = document.createElement('button');
