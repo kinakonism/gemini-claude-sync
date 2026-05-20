@@ -10,6 +10,7 @@ const PORT = 3000;
 const GEMINI_TO_CLAUDE_FILE = join(__dirname, 'gemini_ctx.md');
 const CLAUDE_TO_GEMINI_FILE = join(__dirname, 'claude_out.md');
 const STATUS_FILE = join(__dirname, '.claude_status');
+const PUSH_FILE = join(__dirname, '.claude_push');
 
 function runClaude(prompt) {
   fs.writeFileSync(STATUS_FILE, 'running', 'utf8');
@@ -91,6 +92,37 @@ const server = http.createServer((req, res) => {
       : 'idle';
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ status }));
+  }
+
+  // 【ターミナル → Gemini】テキストをプッシュしてTampermonkeyに拾わせる
+  else if (req.method === 'POST' && req.url === '/push') {
+    let body = '';
+    req.on('data', chunk => { body += chunk.toString(); });
+    req.on('end', () => {
+      try {
+        const data = JSON.parse(body);
+        fs.writeFileSync(PUSH_FILE, data.text, 'utf8');
+        console.log('[Push] Geminiへの送信キューに追加:\n' + data.text);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ status: 'ok' }));
+      } catch {
+        res.writeHead(400).end();
+      }
+    });
+  }
+
+  // 【プッシュ確認】Tampermonkeyがポーリングして未送信テキストを取得
+  else if (req.method === 'GET' && req.url === '/push-status') {
+    res.setHeader('Access-Control-Allow-Origin', 'https://gemini.google.com');
+    if (fs.existsSync(PUSH_FILE)) {
+      const text = fs.readFileSync(PUSH_FILE, 'utf8');
+      fs.unlinkSync(PUSH_FILE); // 読んだら削除（1回限り）
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ text }));
+    } else {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ text: null }));
+    }
   }
 
   // 【スクリプト配信】ファイルのmtimeをバージョンとして差し込んで返す

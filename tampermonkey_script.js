@@ -219,6 +219,30 @@
     });
   }
 
+  // ---- ターミナルからのプッシュをポーリング・自動送信 ----
+  setInterval(() => {
+    GM_xmlhttpRequest({
+      method: 'GET',
+      url: SERVER_URL + '/push-status',
+      onload: (res) => {
+        if (res.status !== 200) return;
+        const { text } = JSON.parse(res.responseText);
+        if (!text) return;
+        setGeminiInput(text);
+        // 入力後に送信ボタンをクリック
+        setTimeout(() => {
+          const submitBtn = document.querySelector('button[aria-label="送信"], button[aria-label="Send message"], button[data-mat-icon-name="send"], .send-button');
+          if (submitBtn) {
+            submitBtn.click();
+            showToast('🚀 ターミナルからの入力を送信しました', 'success');
+          } else {
+            showToast('⚠️ 送信ボタンが見つかりません。手動で送信してください。', 'warning');
+          }
+        }, 500);
+      },
+    });
+  }, 2000);
+
   // ---- トースト通知 ----
   function showToast(message, type = 'success') {
     const colors = { success: '#34A853', error: '#EA4335', warning: '#FBBC04' };
