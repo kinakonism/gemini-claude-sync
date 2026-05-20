@@ -1,4 +1,8 @@
 gemini_ctx.md
 claude_out.md
+.claude_status
+.claude_push
+server.log
+server.log.old
 .claude/settings.local.json
 node_modules/

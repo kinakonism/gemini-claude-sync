@@ -1,10 +1,9 @@
-// server.js (双方向対応版 + Claude自動実行 + WebSocket)
+// server.js (双方向対応版 + Claude自動実行 + ロングポーリング)
 import http from 'http';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 import { spawn, execSync } from 'child_process';
-import { WebSocketServer } from 'ws';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PORT = 3000;
@@ -37,18 +36,21 @@ function notify(title, message) {
   } catch {}
 }
 
-// ---- WebSocket ----
-const httpServer = http.createServer(handleRequest);
-const wss = new WebSocketServer({ server: httpServer });
+// ---- ロングポーリング（GM_xmlhttpRequestはCSPをバイパスできる） ----
+const longPollClients = [];
 
-function broadcast(data) {
-  const msg = JSON.stringify(data);
-  wss.clients.forEach(client => {
-    if (client.readyState === 1) client.send(msg);
-  });
+function broadcastEvent(data) {
+  log('[Event]', JSON.stringify(data));
+  while (longPollClients.length > 0) {
+    const client = longPollClients.shift();
+    clearTimeout(client.timer);
+    if (!client.sent) {
+      client.sent = true;
+      client.res.writeHead(200, { 'Content-Type': 'application/json' });
+      client.res.end(JSON.stringify(data));
+    }
+  }
 }
-
-wss.on('connection', () => log('[WS] クライアント接続'));
 
 // ---- Claude実行 ----
 function runClaude(prompt) {
@@ -60,41 +62,30 @@ function runClaude(prompt) {
     '-p', prompt,
     '--allowedTools', 'Bash,Read,Write,Edit,Glob,Grep',
     '--dangerously-skip-permissions',
-  ], {
-    env: process.env,
-    cwd: __dirname,
-  });
+  ], { env: process.env, cwd: __dirname });
 
   const timer = setTimeout(() => {
     claude.kill();
     fs.writeFileSync(STATUS_FILE, 'done', 'utf8');
     log('[Claude] タイムアウト（5分）で強制終了しました');
     notify('Claude Code', 'タイムアウト（5分）で終了しました');
-    broadcast({ type: 'claude_done', status: 'timeout', text: '' });
+    broadcastEvent({ type: 'claude_done', status: 'timeout', text: '' });
   }, CLAUDE_TIMEOUT_MS);
 
   let output = '';
-
-  // リアルタイムストリーミング
   claude.stdout.on('data', (data) => {
     const chunk = data.toString();
     output += chunk;
-    process.stdout.write(chunk); // ターミナルにリアルタイム表示
+    process.stdout.write(chunk);
     fs.appendFileSync(LOG_FILE, chunk);
   });
-
-  claude.stderr.on('data', (data) => {
-    const msg = data.toString().trim();
-    if (msg) log('[Claude stderr]', msg);
-  });
-
+  claude.stderr.on('data', (data) => { const m = data.toString().trim(); if (m) log('[Claude stderr]', m); });
   claude.on('error', (err) => {
     clearTimeout(timer);
     fs.writeFileSync(STATUS_FILE, 'done', 'utf8');
     log('[Claude] 起動失敗:', err.message);
-    broadcast({ type: 'claude_done', status: 'error', text: '' });
+    broadcastEvent({ type: 'claude_done', status: 'error', text: '' });
   });
-
   claude.on('close', (code) => {
     clearTimeout(timer);
     fs.writeFileSync(STATUS_FILE, 'done', 'utf8');
@@ -103,24 +94,55 @@ function runClaude(prompt) {
       fs.writeFileSync(CLAUDE_TO_GEMINI_FILE, output, 'utf8');
       log('\n' + '─'.repeat(40));
       notify('Claude Code', '完了しました');
-      broadcast({ type: 'claude_done', status: 'done', text: output });
+      broadcastEvent({ type: 'claude_done', status: 'done', text: output });
     } else {
       log(`[Claude] 終了コード: ${code}`);
-      broadcast({ type: 'claude_done', status: 'error', text: '' });
+      broadcastEvent({ type: 'claude_done', status: 'error', text: '' });
     }
   });
 }
 
-// ---- HTTPリクエスト処理 ----
-function handleRequest(req, res) {
+// ---- tampermonkey_script.js の変更を監視 ----
+const scriptPath = join(__dirname, 'tampermonkey_script.js');
+let reloadTimer = null;
+fs.watch(scriptPath, () => {
+  clearTimeout(reloadTimer);
+  reloadTimer = setTimeout(() => {
+    log('[Watch] tampermonkey_script.js が更新されました。クライアントに通知します。');
+    broadcastEvent({ type: 'script_updated' });
+  }, 300);
+});
+
+// ---- HTTPサーバー ----
+const server = http.createServer((req, res) => {
   res.setHeader('Access-Control-Allow-Origin', 'https://gemini.google.com');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
-
   if (req.method === 'OPTIONS') { res.writeHead(200); res.end(); return; }
 
+  // 【イベントストリーム】Tampermonkeyがロングポーリングで受信
+  if (req.method === 'GET' && req.url === '/events') {
+    const client = { res, sent: false };
+    client.timer = setTimeout(() => {
+      if (!client.sent) {
+        client.sent = true;
+        const idx = longPollClients.indexOf(client);
+        if (idx !== -1) longPollClients.splice(idx, 1);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ type: 'heartbeat' }));
+      }
+    }, 25000);
+    longPollClients.push(client);
+    req.on('close', () => {
+      client.sent = true;
+      clearTimeout(client.timer);
+      const idx = longPollClients.indexOf(client);
+      if (idx !== -1) longPollClients.splice(idx, 1);
+    });
+  }
+
   // 【Gemini ➔ Claude】受信 → 即200返却 → バックグラウンドでClaude実行
-  if (req.method === 'POST' && req.url === '/') {
+  else if (req.method === 'POST' && req.url === '/') {
     let body = '';
     req.on('data', chunk => { body += chunk.toString(); });
     req.on('end', () => {
@@ -147,14 +169,14 @@ function handleRequest(req, res) {
     } catch { res.writeHead(500).end(); }
   }
 
-  // 【ステータス確認】後方互換用（WebSocket移行後も残す）
+  // 【ステータス確認】後方互換用
   else if (req.method === 'GET' && req.url === '/status') {
     const status = fs.existsSync(STATUS_FILE) ? fs.readFileSync(STATUS_FILE, 'utf8') : 'idle';
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ status }));
   }
 
-  // 【ターミナル → Gemini】プッシュ → WebSocketで即配信
+  // 【ターミナル → Gemini】プッシュ → ロングポーリングで即配信
   else if (req.method === 'POST' && req.url === '/push') {
     let body = '';
     req.on('data', chunk => { body += chunk.toString(); });
@@ -162,7 +184,7 @@ function handleRequest(req, res) {
       try {
         const data = JSON.parse(body);
         fs.writeFileSync(PUSH_FILE, data.text, 'utf8');
-        broadcast({ type: 'push', text: data.text });
+        broadcastEvent({ type: 'push', text: data.text });
         log('[Push] Geminiへ送信:\n' + data.text.slice(0, 100));
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ status: 'ok' }));
@@ -170,22 +192,8 @@ function handleRequest(req, res) {
     });
   }
 
-  // 【プッシュ確認】WebSocket未接続時のフォールバック用
-  else if (req.method === 'GET' && req.url === '/push-status') {
-    if (fs.existsSync(PUSH_FILE)) {
-      const text = fs.readFileSync(PUSH_FILE, 'utf8');
-      fs.unlinkSync(PUSH_FILE);
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ text }));
-    } else {
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ text: null }));
-    }
-  }
-
   // 【スクリプト配信】mtimeをバージョンとして差し込んで返す
   else if (req.method === 'GET' && (req.url === '/tampermonkey_script.js' || req.url === '/tampermonkey_script.user.js')) {
-    const scriptPath = join(__dirname, 'tampermonkey_script.js');
     let content = fs.readFileSync(scriptPath, 'utf8');
     const version = Math.floor(fs.statSync(scriptPath).mtimeMs / 1000);
     content = content.replace(/(@version\s+)[\d.]+/, `$1${version}`);
@@ -195,19 +203,8 @@ function handleRequest(req, res) {
   }
 
   else { res.writeHead(404).end(); }
-}
-
-// ---- tampermonkey_script.js の変更を監視して即時反映 ----
-const scriptPath = join(__dirname, 'tampermonkey_script.js');
-let reloadTimer = null;
-fs.watch(scriptPath, () => {
-  clearTimeout(reloadTimer);
-  reloadTimer = setTimeout(() => {
-    log('[Watch] tampermonkey_script.js が更新されました。クライアントに通知します。');
-    broadcast({ type: 'script_updated' });
-  }, 300);
 });
 
-httpServer.listen(PORT, () => {
-  log(`Dual-Sync Server running on http://localhost:${PORT} (WebSocket enabled)`);
+server.listen(PORT, () => {
+  log(`Dual-Sync Server running on http://localhost:${PORT} (long polling enabled)`);
 });
