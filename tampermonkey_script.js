@@ -290,14 +290,22 @@
         el.dispatchEvent(new Event('input', { bubbles: true }));
         el.dispatchEvent(new Event('change', { bubbles: true }));
       } else {
-        // contenteditable: まず空にしてから挿入
-        el.innerHTML = '';
+        // contenteditable (Quill等): Trusted Types対応のためinnerHTML禁止
         el.focus();
+        // 全選択してから置換
+        document.execCommand('selectAll', false, null);
         const inserted = document.execCommand('insertText', false, text);
         if (!inserted) {
-          // execCommand が効かない場合は直接innerTextを設定
-          el.innerText = text;
-          el.dispatchEvent(new InputEvent('input', { bubbles: true, data: text }));
+          // execCommandが効かない場合: DataTransfer経由のpasteイベント
+          try {
+            const dt = new DataTransfer();
+            dt.setData('text/plain', text);
+            el.dispatchEvent(new ClipboardEvent('paste', { clipboardData: dt, bubbles: true }));
+          } catch (_) {
+            // 最終手段: innerText直接セット（Trusted Types非適用環境）
+            el.innerText = text;
+            el.dispatchEvent(new InputEvent('input', { bubbles: true, data: text }));
+          }
         }
       }
       showToast('✅ 入力欄にセット完了 (' + sel + ')', 'success');
