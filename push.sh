@@ -49,6 +49,11 @@ ${TEXT}"
   fi
 fi
 
+if ! curl -sf http://localhost:3000/status > /dev/null 2>&1; then
+  echo "❌ サーバーが起動していません。'node ~/developer/gemini-claude-sync/server.js' を実行してください"
+  exit 1
+fi
+
 RESULT=$(curl -s -X POST http://localhost:3000/push \
   -H "Content-Type: application/json" \
   -d "{\"text\": $(echo "$TEXT" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read().strip()))')}")

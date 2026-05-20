@@ -133,7 +133,7 @@
         const submitBtn = [
           'button[aria-label="送信"]', 'button[aria-label="Send message"]',
           'button[data-mat-icon-name="send"]', 'button[jsname="Qx7uuf"]', '.send-button',
-        ].map(sel => document.querySelector(sel)).find(Boolean);
+        ].map(sel => deepQuery(sel)).find(Boolean);
         if (submitBtn) {
           submitBtn.click();
           showToast('🚀 送信完了。Geminiの回答を待っています...', 'success');
@@ -196,15 +196,15 @@
 
   // ---- Geminiの回答が完了したらClaudeに自動送信（ラウンドトリップ） ----
   function watchForGeminiResponse() {
-    const container = document.querySelector('chat-history, .conversation-container, main');
+    const container = deepQuery('chat-history') || deepQuery('.conversation-container') || document.querySelector('main');
     if (!container) return;
 
-    const initialCount = document.querySelectorAll('model-response, message-content').length;
+    const initialCount = container.querySelectorAll('model-response, message-content').length;
     let debounceTimer = null;
     let triggered = false;
 
     const observer = new MutationObserver(() => {
-      const currentCount = document.querySelectorAll('model-response, message-content').length;
+      const currentCount = container.querySelectorAll('model-response, message-content').length;
       if (currentCount <= initialCount) return;
 
       clearTimeout(debounceTimer);
@@ -213,7 +213,7 @@
         triggered = true;
         observer.disconnect();
 
-        const responses = document.querySelectorAll('model-response .markdown, message-content');
+        const responses = container.querySelectorAll('model-response .markdown, message-content');
         const latestText = responses[responses.length - 1]?.innerText?.trim();
         if (!latestText) return;
 

@@ -54,6 +54,12 @@ function broadcastEvent(data) {
 
 // ---- Claude実行 ----
 function runClaude(prompt) {
+  const currentStatus = fs.existsSync(STATUS_FILE) ? fs.readFileSync(STATUS_FILE, 'utf8') : 'idle';
+  if (currentStatus === 'running') {
+    log('[Claude] 既に実行中のため無視します');
+    broadcastEvent({ type: 'claude_done', status: 'busy', text: '' });
+    return;
+  }
   fs.writeFileSync(STATUS_FILE, 'running', 'utf8');
   log('[Claude] 実行開始...');
 
