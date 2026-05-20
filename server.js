@@ -197,6 +197,17 @@ function handleRequest(req, res) {
   else { res.writeHead(404).end(); }
 }
 
+// ---- tampermonkey_script.js の変更を監視して即時反映 ----
+const scriptPath = join(__dirname, 'tampermonkey_script.js');
+let reloadTimer = null;
+fs.watch(scriptPath, () => {
+  clearTimeout(reloadTimer);
+  reloadTimer = setTimeout(() => {
+    log('[Watch] tampermonkey_script.js が更新されました。クライアントに通知します。');
+    broadcast({ type: 'script_updated' });
+  }, 300);
+});
+
 httpServer.listen(PORT, () => {
   log(`Dual-Sync Server running on http://localhost:${PORT} (WebSocket enabled)`);
 });

@@ -138,6 +138,13 @@
         }, 500);
       }
 
+      // スクリプト更新通知 → ページリロードで即時反映
+      if (data.type === 'script_updated') {
+        showToast('🔄 スクリプトが更新されました。リロードします...', 'warning');
+        setTimeout(() => location.reload(), 1000);
+        return;
+      }
+
       // Claude完了通知 → 入力欄にセット
       if (data.type === 'claude_done' && data.status === 'done') {
         sendBtn.textContent = '📤 Gemini → Claude';
