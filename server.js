@@ -52,7 +52,7 @@ const server = http.createServer((req, res) => {
   }
 
   // 【Gemini ➔ Claude】受信 → 即200返却 → バックグラウンドでClaude実行
-  if (req.method === 'POST') {
+  if (req.method === 'POST' && req.url === '/') {
     let body = '';
     req.on('data', chunk => { body += chunk.toString(); });
     req.on('end', () => {

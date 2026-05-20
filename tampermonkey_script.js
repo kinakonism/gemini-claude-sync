@@ -15,6 +15,15 @@
   'use strict';
 
   const SERVER_URL = 'http://localhost:3000';
+  console.log('[GeminiSync] スクリプト起動');
+
+  // 接続テスト
+  GM_xmlhttpRequest({
+    method: 'GET',
+    url: SERVER_URL + '/status',
+    onload: (res) => console.log('[GeminiSync] サーバー接続OK:', res.status),
+    onerror: () => console.error('[GeminiSync] サーバー接続失敗 (node server.js は起動中？)'),
+  });
 
   // ---- UI ボタンを画面に追加 ----
   const panel = document.createElement('div');
@@ -225,18 +234,46 @@
       method: 'GET',
       url: SERVER_URL + '/push-status',
       onload: (res) => {
+        console.log('[Push] poll応答:', res.status, res.responseText);
         if (res.status !== 200) return;
-        const { text } = JSON.parse(res.responseText);
+        let text;
+        try {
+          text = JSON.parse(res.responseText || res.response).text;
+        } catch(e) {
+          console.error('[Push] パースエラー:', e, res.responseText);
+          return;
+        }
         if (!text) return;
+        showToast('📨 テキスト受信！', 'warning');
+        console.log('[Push] 受信テキスト:', text.slice(0, 50));
+
+        const inputSelectors = [
+          'rich-textarea .ql-editor',
+          'textarea[aria-label]',
+          '[contenteditable="true"]',
+          'rich-textarea',
+        ];
+        const foundInput = inputSelectors.find(sel => document.querySelector(sel));
+        console.log('[Push] 入力欄セレクタ:', foundInput || 'なし');
+
         setGeminiInput(text);
-        // 入力後に送信ボタンをクリック
+
         setTimeout(() => {
-          const submitBtn = document.querySelector('button[aria-label="送信"], button[aria-label="Send message"], button[data-mat-icon-name="send"], .send-button');
+          const submitSelectors = [
+            'button[aria-label="送信"]',
+            'button[aria-label="Send message"]',
+            'button[data-mat-icon-name="send"]',
+            'button[jsname="Qx7uuf"]',
+            '.send-button',
+            'button.send',
+          ];
+          const submitBtn = submitSelectors.map(sel => document.querySelector(sel)).find(Boolean);
+          console.log('[Push] 送信ボタン:', submitBtn ? submitBtn.outerHTML.slice(0, 100) : 'なし');
           if (submitBtn) {
             submitBtn.click();
-            showToast('🚀 ターミナルからの入力を送信しました', 'success');
+            showToast('🚀 送信しました！', 'success');
           } else {
-            showToast('⚠️ 送信ボタンが見つかりません。手動で送信してください。', 'warning');
+            showToast('⚠️ 送信ボタンが見つかりません。F12コンソールを確認してください。', 'warning');
           }
         }, 500);
       },
