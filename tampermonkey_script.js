@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         Gemini <-> Claude Code Bi-directional Sync v4.0
+// @name         Gemini <-> Claude Code Bi-directional Sync v5.0
 // @namespace    http://tampermonkey.net/
-// @version      4.0
-// @description  Web版GeminiとClaude Codeの双方向コンテキスト同期（Claude自動実行対応）
+// @version      5.0
+// @description  Web版GeminiとClaude Codeの双方向コンテキスト同期（完全自動ラウンドトリップ対応）
 // @author       User
 // @match        https://gemini.google.com/*
 // @grant        GM_xmlhttpRequest
@@ -14,16 +14,11 @@
 (function () {
   'use strict';
 
-  const SERVER_URL = 'http://localhost:3000';
-  console.log('[GeminiSync] スクリプト起動');
+  // ---- 2重初期化ガード（SPA対策） ----
+  if (window.__geminiSyncInit) return;
+  window.__geminiSyncInit = true;
 
-  // 接続テスト
-  GM_xmlhttpRequest({
-    method: 'GET',
-    url: SERVER_URL + '/status',
-    onload: (res) => console.log('[GeminiSync] サーバー接続OK:', res.status),
-    onerror: () => console.error('[GeminiSync] サーバー接続失敗 (node server.js は起動中？)'),
-  });
+  const SERVER_URL = 'http://localhost:3000';
 
   // ---- UI ボタンを画面に追加 ----
   const panel = document.createElement('div');
@@ -53,18 +48,13 @@
   const sendBtn = document.createElement('button');
   sendBtn.textContent = '📤 Gemini → Claude';
   sendBtn.style.cssText = btnStyle + 'background: #4285F4; color: white;';
-  sendBtn.title = 'Geminiの最新会話内容をローカルサーバー経由でgemini_ctx.mdに保存します';
 
   sendBtn.addEventListener('click', () => {
     const text = extractGeminiConversation();
-    if (!text) {
-      showToast('⚠️ 会話テキストが見つかりませんでした', 'warning');
-      return;
-    }
-
+    if (!text) { showToast('⚠️ 会話テキストが見つかりませんでした', 'warning'); return; }
     GM_xmlhttpRequest({
       method: 'POST',
-      url: SERVER_URL,
+      url: SERVER_URL + '/',
       headers: { 'Content-Type': 'application/json' },
       data: JSON.stringify({ text }),
       onload: (res) => {
@@ -77,11 +67,35 @@
           showToast('❌ 送信失敗: ' + res.status, 'error');
         }
       },
-      onerror: () => showToast('❌ サーバーに接続できません（node server.js は起動中？）', 'error'),
+      onerror: () => showToast('❌ サーバーに接続できません', 'error'),
     });
   });
 
-  // Claudeの完了をポーリングして自動受信
+  // 【Claude → Gemini】Claudeの出力を入力欄にセット
+  const fetchBtn = document.createElement('button');
+  fetchBtn.textContent = '📥 Claude → Gemini';
+  fetchBtn.style.cssText = btnStyle + 'background: #34A853; color: white;';
+
+  fetchBtn.addEventListener('click', () => {
+    GM_xmlhttpRequest({
+      method: 'GET',
+      url: SERVER_URL + '/',
+      onload: (res) => {
+        if (res.status === 200) {
+          const data = JSON.parse(res.responseText);
+          setGeminiInput(data.text);
+          showToast('✅ Claudeの出力を入力欄にセットしました！', 'success');
+        }
+      },
+      onerror: () => showToast('❌ サーバーに接続できません', 'error'),
+    });
+  });
+
+  panel.appendChild(sendBtn);
+  panel.appendChild(fetchBtn);
+  document.body.appendChild(panel);
+
+  // ---- Claudeの完了をポーリングして自動受信 ----
   function pollUntilDone() {
     const interval = setInterval(() => {
       GM_xmlhttpRequest({
@@ -94,191 +108,131 @@
             clearInterval(interval);
             sendBtn.textContent = '📤 Gemini → Claude';
             sendBtn.disabled = false;
-            autoReceive();
+            GM_xmlhttpRequest({
+              method: 'GET',
+              url: SERVER_URL + '/',
+              onload: (res2) => {
+                if (res2.status === 200) {
+                  const data = JSON.parse(res2.responseText);
+                  setGeminiInput(data.text);
+                  showToast('✅ Claudeの回答を入力欄にセットしました！', 'success');
+                }
+              },
+            });
           }
         },
       });
     }, 2000);
   }
 
-  // 完了後に自動でClaude出力を入力欄にセット
-  function autoReceive() {
-    GM_xmlhttpRequest({
-      method: 'GET',
-      url: SERVER_URL,
-      onload: (res) => {
-        if (res.status === 200) {
-          const data = JSON.parse(res.responseText);
-          setGeminiInput(data.text);
-          showToast('✅ Claudeの回答を入力欄にセットしました！', 'success');
-        }
-      },
-    });
-  }
-
-  // 【Claude → Gemini】Claudeの出力を入力欄にセット
-  const fetchBtn = document.createElement('button');
-  fetchBtn.textContent = '📥 Claude → Gemini';
-  fetchBtn.style.cssText = btnStyle + 'background: #34A853; color: white;';
-  fetchBtn.title = 'claude_out.mdの内容をGeminiの入力欄にセットします';
-
-  fetchBtn.addEventListener('click', () => {
-    GM_xmlhttpRequest({
-      method: 'GET',
-      url: SERVER_URL,
-      onload: (res) => {
-        if (res.status === 200) {
-          try {
-            const data = JSON.parse(res.responseText);
-            setGeminiInput(data.text);
-            showToast('✅ Claudeの出力を入力欄にセットしました！', 'success');
-          } catch (e) {
-            showToast('❌ レスポンスのパースに失敗しました', 'error');
-          }
-        } else {
-          showToast('❌ 取得失敗: ' + res.status, 'error');
-        }
-      },
-      onerror: () => showToast('❌ サーバーに接続できません（node server.js は起動中？）', 'error'),
-    });
-  });
-
-  panel.appendChild(sendBtn);
-  panel.appendChild(fetchBtn);
-  document.body.appendChild(panel);
-
-  // ---- 同期アーティファクトを除去 ----
-  // gemini_ctx.md の内容が Gemini 画面に表示され、次の送信時に拾われる入れ子問題を防ぐ
-  function stripSyncArtifacts(text) {
-    const lines = text.split('\n');
-    const result = [];
-    let skipping = false;
-
-    for (const line of lines) {
-      // "### Gemini Context (..." で始まるブロックに入ったらスキップ開始
-      if (/^### Gemini Context \(/.test(line)) {
-        skipping = true;
-      }
-      // スキップ中でも次の本来の会話見出し（👤 / 🤖）が来たら再開
-      if (skipping && /^### (👤|🤖)/.test(line)) {
-        skipping = false;
-      }
-      if (!skipping) {
-        result.push(line);
-      }
-    }
-
-    return result.join('\n').trim();
-  }
-
-  // ---- Gemini の会話テキストを抽出 ----
-  function extractGeminiConversation() {
-    // Geminiのメッセージバブルを取得（構造変化に備えて複数セレクタを試行）
-    const selectors = [
-      'model-response .markdown',
-      '.response-content',
-      'message-content',
-      '[data-message-role]',
-      '.conversation-container',
-    ];
-
-    for (const sel of selectors) {
-      const nodes = document.querySelectorAll(sel);
-      if (nodes.length > 0) {
-        const raw = Array.from(nodes)
-          .map(n => n.innerText.trim())
-          .filter(t => t.length > 0)
-          .join('\n\n---\n\n');
-        return stripSyncArtifacts(raw);
-      }
-    }
-
-    // フォールバック: ページ全体の表示テキストから取得
-    const body = document.body.innerText;
-    return body.length > 100 ? stripSyncArtifacts(body.substring(0, 8000)) : null;
-  }
-
-  // ---- Gemini の入力欄にテキストをセット ----
-  function setGeminiInput(text) {
-    const selectors = [
-      'rich-textarea .ql-editor',
-      'textarea[aria-label]',
-      '[contenteditable="true"]',
-      'rich-textarea',
-    ];
-
-    for (const sel of selectors) {
-      const el = document.querySelector(sel);
-      if (el) {
-        el.focus();
-        if (el.tagName === 'TEXTAREA') {
-          const nativeInputValueSetter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value').set;
-          nativeInputValueSetter.call(el, text);
-          el.dispatchEvent(new Event('input', { bubbles: true }));
-        } else {
-          el.innerText = text;
-          el.dispatchEvent(new Event('input', { bubbles: true }));
-        }
-        return;
-      }
-    }
-    // 入力欄が見つからなければクリップボードにコピー
-    navigator.clipboard.writeText(text).then(() => {
-      showToast('⚠️ 入力欄が見つからないためクリップボードにコピーしました', 'warning');
-    });
-  }
-
-  // ---- ターミナルからのプッシュをポーリング・自動送信 ----
+  // ---- ターミナルからのプッシュをポーリング・自動送信・ラウンドトリップ ----
   setInterval(() => {
     GM_xmlhttpRequest({
       method: 'GET',
       url: SERVER_URL + '/push-status',
       onload: (res) => {
-        console.log('[Push] poll応答:', res.status, res.responseText);
         if (res.status !== 200) return;
         let text;
-        try {
-          text = JSON.parse(res.responseText || res.response).text;
-        } catch(e) {
-          console.error('[Push] パースエラー:', e, res.responseText);
-          return;
-        }
+        try { text = JSON.parse(res.responseText || res.response).text; } catch { return; }
         if (!text) return;
-        showToast('📨 テキスト受信！', 'warning');
-        console.log('[Push] 受信テキスト:', text.slice(0, 50));
 
-        const inputSelectors = [
-          'rich-textarea .ql-editor',
-          'textarea[aria-label]',
-          '[contenteditable="true"]',
-          'rich-textarea',
-        ];
-        const foundInput = inputSelectors.find(sel => document.querySelector(sel));
-        console.log('[Push] 入力欄セレクタ:', foundInput || 'なし');
-
+        showToast('📨 ターミナルから受信、Geminiに送信中...', 'warning');
         setGeminiInput(text);
 
         setTimeout(() => {
-          const submitSelectors = [
+          const submitBtn = [
             'button[aria-label="送信"]',
             'button[aria-label="Send message"]',
             'button[data-mat-icon-name="send"]',
             'button[jsname="Qx7uuf"]',
             '.send-button',
-            'button.send',
-          ];
-          const submitBtn = submitSelectors.map(sel => document.querySelector(sel)).find(Boolean);
-          console.log('[Push] 送信ボタン:', submitBtn ? submitBtn.outerHTML.slice(0, 100) : 'なし');
+          ].map(sel => document.querySelector(sel)).find(Boolean);
+
           if (submitBtn) {
             submitBtn.click();
-            showToast('🚀 送信しました！', 'success');
+            showToast('🚀 送信完了。Geminiの回答を待っています...', 'success');
+            watchForGeminiResponse();
           } else {
-            showToast('⚠️ 送信ボタンが見つかりません。F12コンソールを確認してください。', 'warning');
+            showToast('⚠️ 送信ボタンが見つかりません', 'warning');
           }
         }, 500);
       },
+      onerror: () => {},
     });
   }, 2000);
+
+  // ---- Geminiの回答が完了したらClaudeに自動送信（ラウンドトリップ） ----
+  function watchForGeminiResponse() {
+    const container = document.querySelector('chat-history, .conversation-container, main');
+    if (!container) return;
+
+    const initialCount = document.querySelectorAll('model-response, message-content').length;
+    let debounceTimer = null;
+    let triggered = false;
+
+    const observer = new MutationObserver(() => {
+      const currentCount = document.querySelectorAll('model-response, message-content').length;
+      if (currentCount <= initialCount) return;
+
+      clearTimeout(debounceTimer);
+      debounceTimer = setTimeout(() => {
+        if (triggered) return;
+        triggered = true;
+        observer.disconnect();
+
+        const responses = document.querySelectorAll('model-response .markdown, message-content');
+        const latestText = responses[responses.length - 1]?.innerText?.trim();
+        if (!latestText) return;
+
+        GM_xmlhttpRequest({
+          method: 'POST',
+          url: SERVER_URL + '/',
+          headers: { 'Content-Type': 'application/json' },
+          data: JSON.stringify({ text: `## Geminiの回答:\n\n${latestText}` }),
+          onload: () => showToast('🔄 Geminiの回答をClaudeに送信しました', 'success'),
+          onerror: () => {},
+        });
+      }, 2500);
+    });
+
+    observer.observe(container, { childList: true, subtree: true, characterData: true });
+    setTimeout(() => observer.disconnect(), 90000);
+  }
+
+  // ---- Geminiの会話テキストを抽出 ----
+  function extractGeminiConversation() {
+    const selectors = ['model-response .markdown', '.response-content', 'message-content', '[data-message-role]'];
+    for (const sel of selectors) {
+      const nodes = document.querySelectorAll(sel);
+      if (nodes.length > 0) {
+        return Array.from(nodes).map(n => n.innerText.trim()).filter(t => t.length > 0).join('\n\n---\n\n');
+      }
+    }
+    const body = document.body.innerText;
+    return body.length > 100 ? body.substring(0, 8000) : null;
+  }
+
+  // ---- Geminiの入力欄にテキストをセット ----
+  function setGeminiInput(text) {
+    const selectors = ['rich-textarea .ql-editor', 'textarea[aria-label]', '[contenteditable="true"]', 'rich-textarea'];
+    for (const sel of selectors) {
+      const el = document.querySelector(sel);
+      if (el) {
+        el.focus();
+        if (el.tagName === 'TEXTAREA') {
+          const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value').set;
+          setter.call(el, text);
+        } else {
+          el.innerText = text;
+        }
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+        return;
+      }
+    }
+    navigator.clipboard.writeText(text).then(() => {
+      showToast('⚠️ 入力欄が見つからないためクリップボードにコピーしました', 'warning');
+    });
+  }
 
   // ---- トースト通知 ----
   function showToast(message, type = 'success') {
@@ -297,7 +251,6 @@
       font-size: 13px;
       font-family: sans-serif;
       box-shadow: 0 2px 8px rgba(0,0,0,0.3);
-      animation: fadeIn 0.3s ease;
     `;
     document.body.appendChild(toast);
     setTimeout(() => toast.remove(), 3500);
