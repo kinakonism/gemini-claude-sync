@@ -11,10 +11,27 @@ const GEMINI_TO_CLAUDE_FILE = join(__dirname, 'gemini_ctx.md');
 const CLAUDE_TO_GEMINI_FILE = join(__dirname, 'claude_out.md');
 const STATUS_FILE = join(__dirname, '.claude_status');
 const PUSH_FILE = join(__dirname, '.claude_push');
+const LOG_FILE = join(__dirname, 'server.log');
+const LOG_OLD_FILE = join(__dirname, 'server.log.old');
+const MAX_LOG_BYTES = 1024 * 1024; // 1MB
+const CLAUDE_TIMEOUT_MS = 5 * 60 * 1000; // 5分
+
+// ---- ログ（1MBでローテーション） ----
+function log(...args) {
+  const msg = `[${new Date().toLocaleString()}] ${args.join(' ')}\n`;
+  process.stdout.write(msg);
+  try {
+    if (fs.existsSync(LOG_FILE) && fs.statSync(LOG_FILE).size > MAX_LOG_BYTES) {
+      if (fs.existsSync(LOG_OLD_FILE)) fs.unlinkSync(LOG_OLD_FILE);
+      fs.renameSync(LOG_FILE, LOG_OLD_FILE);
+    }
+    fs.appendFileSync(LOG_FILE, msg);
+  } catch {}
+}
 
 function runClaude(prompt) {
   fs.writeFileSync(STATUS_FILE, 'running', 'utf8');
-  console.log('[Claude] 実行開始...');
+  log('[Claude] 実行開始...');
 
   const claudeBin = process.env.CLAUDE_BIN || '/Users/masato/.nvm/versions/node/v22.17.0/bin/claude';
   const claude = spawn(claudeBin, [
@@ -26,21 +43,30 @@ function runClaude(prompt) {
     cwd: __dirname,
   });
 
+  // タイムアウト
+  const timer = setTimeout(() => {
+    claude.kill();
+    fs.writeFileSync(STATUS_FILE, 'done', 'utf8');
+    log('[Claude] タイムアウト（5分）で強制終了しました');
+  }, CLAUDE_TIMEOUT_MS);
+
   let output = '';
   claude.stdout.on('data', (data) => { output += data.toString(); });
-  claude.stderr.on('data', (data) => { console.error('[Claude stderr]', data.toString()); });
+  claude.stderr.on('data', (data) => { log('[Claude stderr]', data.toString().trim()); });
   claude.on('error', (err) => {
+    clearTimeout(timer);
     fs.writeFileSync(STATUS_FILE, 'done', 'utf8');
-    console.error('[Claude] 起動失敗:', err.message);
+    log('[Claude] 起動失敗:', err.message);
   });
 
   claude.on('close', (code) => {
+    clearTimeout(timer);
     fs.writeFileSync(STATUS_FILE, 'done', 'utf8');
     if (code === 0 && output.trim()) {
       fs.writeFileSync(CLAUDE_TO_GEMINI_FILE, output, 'utf8');
-      console.log('[Claude] 完了:\n' + '─'.repeat(40) + '\n' + output.trim() + '\n' + '─'.repeat(40));
+      log('[Claude] 完了:\n' + '─'.repeat(40) + '\n' + output.trim() + '\n' + '─'.repeat(40));
     } else {
-      console.error(`[Claude] 終了コード: ${code}`);
+      log(`[Claude] 終了コード: ${code}`);
     }
   });
 }
@@ -65,12 +91,10 @@ const server = http.createServer((req, res) => {
         const data = JSON.parse(body);
         const content = `### Gemini Context (${new Date().toLocaleString()})\n\n${data.text}\n`;
         fs.writeFileSync(GEMINI_TO_CLAUDE_FILE, content, 'utf8');
-
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ status: 'ok' }));
-
         runClaude(data.text);
-        console.log('[Success] Geminiの指示を受信。Claudeを起動しました。');
+        log('[Success] Geminiの指示を受信。Claudeを起動しました。');
       } catch (err) {
         res.writeHead(400).end();
       }
@@ -107,7 +131,7 @@ const server = http.createServer((req, res) => {
       try {
         const data = JSON.parse(body);
         fs.writeFileSync(PUSH_FILE, data.text, 'utf8');
-        console.log('[Push] Geminiへの送信キューに追加:\n' + data.text);
+        log('[Push] Geminiへの送信キューに追加:\n' + data.text);
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ status: 'ok' }));
       } catch {
@@ -118,10 +142,9 @@ const server = http.createServer((req, res) => {
 
   // 【プッシュ確認】Tampermonkeyがポーリングして未送信テキストを取得
   else if (req.method === 'GET' && req.url === '/push-status') {
-    res.setHeader('Access-Control-Allow-Origin', 'https://gemini.google.com');
     if (fs.existsSync(PUSH_FILE)) {
       const text = fs.readFileSync(PUSH_FILE, 'utf8');
-      fs.unlinkSync(PUSH_FILE); // 読んだら削除（1回限り）
+      fs.unlinkSync(PUSH_FILE);
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ text }));
     } else {
@@ -147,5 +170,5 @@ const server = http.createServer((req, res) => {
 });
 
 server.listen(PORT, () => {
-  console.log(`Dual-Sync Server running on http://localhost:${PORT}`);
+  log(`Dual-Sync Server running on http://localhost:${PORT}`);
 });

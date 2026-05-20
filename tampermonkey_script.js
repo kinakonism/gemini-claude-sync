@@ -20,6 +20,16 @@
 
   const SERVER_URL = 'http://localhost:3000';
 
+  // ---- 差分送信: 前回送った要素数を記録、URL変更でリセット ----
+  let lastSentCount = 0;
+  let lastUrl = location.href;
+  setInterval(() => {
+    if (location.href !== lastUrl) {
+      lastUrl = location.href;
+      lastSentCount = 0;
+    }
+  }, 1000);
+
   // ---- UI ボタンを画面に追加 ----
   const panel = document.createElement('div');
   panel.style.cssText = `
@@ -199,14 +209,23 @@
     setTimeout(() => observer.disconnect(), 90000);
   }
 
-  // ---- Geminiの会話テキストを抽出 ----
+  // ---- Geminiの会話テキストを抽出（差分のみ） ----
   function extractGeminiConversation() {
     const selectors = ['model-response .markdown', '.response-content', 'message-content', '[data-message-role]'];
     for (const sel of selectors) {
       const nodes = document.querySelectorAll(sel);
-      if (nodes.length > 0) {
-        return Array.from(nodes).map(n => n.innerText.trim()).filter(t => t.length > 0).join('\n\n---\n\n');
+      if (nodes.length === 0) continue;
+
+      const newNodes = Array.from(nodes).slice(lastSentCount);
+      if (newNodes.length === 0) {
+        showToast('⚠️ 前回から新しいメッセージがありません', 'warning');
+        return null;
       }
+
+      const prefix = lastSentCount === 0 ? '' : `## 追加メッセージ（${lastSentCount + 1}件目〜）\n\n`;
+      const text = newNodes.map(n => n.innerText.trim()).filter(t => t.length > 0).join('\n\n---\n\n');
+      lastSentCount = nodes.length;
+      return prefix + text;
     }
     const body = document.body.innerText;
     return body.length > 100 ? body.substring(0, 8000) : null;
