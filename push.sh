@@ -1,16 +1,52 @@
 #!/bin/bash
 # 使い方:
-#   ./push.sh "送信したいテキスト"
-#   echo "テキスト" | ./push.sh
-#   cat file.md | ./push.sh
+#   push.sh "質問"              通常送信
+#   push.sh -c "質問"           現在のgitリポジトリのコンテキスト（CLAUDE.md）を添付
+#   echo "質問" | push.sh       パイプ入力
+#   cat file.md | push.sh -c    ファイル内容をコンテキスト付きで送信
 
-if [ -n "$1" ]; then
-  TEXT="$1"
-elif [ ! -t 0 ]; then
+USE_CONTEXT=false
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -c|--context) USE_CONTEXT=true; shift ;;
+    *) TEXT="$1"; shift ;;
+  esac
+done
+
+if [ -z "$TEXT" ] && [ ! -t 0 ]; then
   TEXT=$(cat)
-else
-  echo "使い方: $0 \"送信したいテキスト\" または echo \"テキスト\" | $0"
+fi
+
+if [ -z "$TEXT" ]; then
+  echo "使い方: $(basename $0) [-c] \"送信したいテキスト\" または echo \"テキスト\" | $(basename $0) [-c]"
   exit 1
+fi
+
+if [ "$USE_CONTEXT" = true ]; then
+  GIT_ROOT=$(git rev-parse --show-toplevel 2>/dev/null)
+  if [ -n "$GIT_ROOT" ]; then
+    PROJECT_NAME=$(basename "$GIT_ROOT")
+    if [ -f "$GIT_ROOT/CLAUDE.md" ]; then
+      CONTEXT=$(cat "$GIT_ROOT/CLAUDE.md")
+      TEXT="## プロジェクトコンテキスト: ${PROJECT_NAME}
+
+${CONTEXT}
+
+---
+
+${TEXT}"
+    else
+      TEXT="## プロジェクト: ${PROJECT_NAME}
+
+---
+
+${TEXT}"
+    fi
+    echo "📎 コンテキスト添付: ${PROJECT_NAME}"
+  else
+    echo "⚠️ gitリポジトリが見つかりません。コンテキストなしで送信します。"
+  fi
 fi
 
 RESULT=$(curl -s -X POST http://localhost:3000/push \

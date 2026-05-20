@@ -105,8 +105,64 @@
   panel.appendChild(fetchBtn);
   document.body.appendChild(panel);
 
-  // ---- Claudeの完了をポーリングして自動受信 ----
+  // ---- WebSocket接続（push・Claude完了をリアルタイム受信） ----
+  let ws = null;
+  let wsReady = false;
+
+  function connectWebSocket() {
+    ws = new WebSocket('ws://localhost:3000');
+
+    ws.onopen = () => {
+      wsReady = true;
+    };
+
+    ws.onmessage = (event) => {
+      const data = JSON.parse(event.data);
+
+      // ターミナルからのpushを受信 → Geminiに自動送信
+      if (data.type === 'push') {
+        showToast('📨 ターミナルから受信、Geminiに送信中...', 'warning');
+        setGeminiInput(data.text);
+        setTimeout(() => {
+          const submitBtn = [
+            'button[aria-label="送信"]', 'button[aria-label="Send message"]',
+            'button[data-mat-icon-name="send"]', 'button[jsname="Qx7uuf"]', '.send-button',
+          ].map(sel => document.querySelector(sel)).find(Boolean);
+          if (submitBtn) {
+            submitBtn.click();
+            showToast('🚀 送信完了。Geminiの回答を待っています...', 'success');
+            watchForGeminiResponse();
+          } else {
+            showToast('⚠️ 送信ボタンが見つかりません', 'warning');
+          }
+        }, 500);
+      }
+
+      // Claude完了通知 → 入力欄にセット
+      if (data.type === 'claude_done' && data.status === 'done') {
+        sendBtn.textContent = '📤 Gemini → Claude';
+        sendBtn.disabled = false;
+        if (data.text) {
+          setGeminiInput(data.text);
+          showToast('✅ Claudeの回答を入力欄にセットしました！', 'success');
+        }
+      }
+    };
+
+    ws.onclose = () => {
+      wsReady = false;
+      // 5秒後に再接続
+      setTimeout(connectWebSocket, 5000);
+    };
+
+    ws.onerror = () => { ws.close(); };
+  }
+
+  connectWebSocket();
+
+  // ---- Claudeの完了をポーリング（WebSocket未接続時のフォールバック） ----
   function pollUntilDone() {
+    if (wsReady) return; // WebSocket接続中はポーリング不要
     const interval = setInterval(() => {
       GM_xmlhttpRequest({
         method: 'GET',
@@ -135,41 +191,6 @@
     }, 2000);
   }
 
-  // ---- ターミナルからのプッシュをポーリング・自動送信・ラウンドトリップ ----
-  setInterval(() => {
-    GM_xmlhttpRequest({
-      method: 'GET',
-      url: SERVER_URL + '/push-status',
-      onload: (res) => {
-        if (res.status !== 200) return;
-        let text;
-        try { text = JSON.parse(res.responseText || res.response).text; } catch { return; }
-        if (!text) return;
-
-        showToast('📨 ターミナルから受信、Geminiに送信中...', 'warning');
-        setGeminiInput(text);
-
-        setTimeout(() => {
-          const submitBtn = [
-            'button[aria-label="送信"]',
-            'button[aria-label="Send message"]',
-            'button[data-mat-icon-name="send"]',
-            'button[jsname="Qx7uuf"]',
-            '.send-button',
-          ].map(sel => document.querySelector(sel)).find(Boolean);
-
-          if (submitBtn) {
-            submitBtn.click();
-            showToast('🚀 送信完了。Geminiの回答を待っています...', 'success');
-            watchForGeminiResponse();
-          } else {
-            showToast('⚠️ 送信ボタンが見つかりません', 'warning');
-          }
-        }, 500);
-      },
-      onerror: () => {},
-    });
-  }, 2000);
 
   // ---- Geminiの回答が完了したらClaudeに自動送信（ラウンドトリップ） ----
   function watchForGeminiResponse() {
