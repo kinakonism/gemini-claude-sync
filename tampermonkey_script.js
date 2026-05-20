@@ -254,26 +254,45 @@
     return body.length > 100 ? body.substring(0, 8000) : null;
   }
 
+  // ---- shadow DOMを再帰的に検索 ----
+  function deepQuery(selector, root = document) {
+    const el = root.querySelector(selector);
+    if (el) return el;
+    for (const node of root.querySelectorAll('*')) {
+      if (node.shadowRoot) {
+        const found = deepQuery(selector, node.shadowRoot);
+        if (found) return found;
+      }
+    }
+    return null;
+  }
+
   // ---- Geminiの入力欄にテキストをセット ----
   function setGeminiInput(text) {
-    const selectors = ['rich-textarea .ql-editor', 'textarea[aria-label]', '[contenteditable="true"]', 'rich-textarea'];
+    const selectors = ['.ql-editor[contenteditable="true"]', 'rich-textarea .ql-editor', 'textarea[aria-label]', '[contenteditable="true"]'];
     for (const sel of selectors) {
-      const el = document.querySelector(sel);
+      const el = deepQuery(sel);
       if (el) {
         el.focus();
         if (el.tagName === 'TEXTAREA') {
           const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value').set;
           setter.call(el, text);
+          el.dispatchEvent(new Event('input', { bubbles: true }));
         } else {
-          el.innerText = text;
+          // Quill editor: execCommand でテキスト挿入（内部状態を正しく更新）
+          document.execCommand('selectAll', false, null);
+          document.execCommand('insertText', false, text);
         }
-        el.dispatchEvent(new Event('input', { bubbles: true }));
         return;
       }
     }
-    navigator.clipboard.writeText(text).then(() => {
-      showToast('⚠️ 入力欄が見つからないためクリップボードにコピーしました', 'warning');
-    });
+    try {
+      navigator.clipboard.writeText(text).then(() => {
+        showToast('⚠️ 入力欄が見つからないためクリップボードにコピーしました', 'warning');
+      });
+    } catch {
+      showToast('⚠️ 入力欄が見つかりません。Geminiタブをアクティブにしてください', 'warning');
+    }
   }
 
   // ---- トースト通知 ----
