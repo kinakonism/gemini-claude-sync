@@ -70,7 +70,10 @@
     GM_xmlhttpRequest({
       method: 'GET', url: SERVER_URL + '/events', timeout: 30000,
       onload: (res) => {
-        try { const d = JSON.parse(res.responseText); if (d.type !== 'heartbeat') handleServerEvent(d); } catch {}
+        try {
+          const d = JSON.parse(res.responseText);
+          if (d.type !== 'heartbeat') handleServerEvent(d);
+        } catch {}
         startLongPoll();
       },
       onerror: () => setTimeout(startLongPoll, 3000),
@@ -78,9 +81,20 @@
     });
   }
 
+  // ---- ACK（pending削除）----
+  function sendAck() {
+    GM_xmlhttpRequest({
+      method: 'POST', url: SERVER_URL + '/ack',
+      headers: { 'Content-Type': 'application/json' },
+      data: '{}', onload: () => {}, onerror: () => {},
+    });
+  }
+
   // ---- サーバーイベント処理 ----
   function handleServerEvent(data) {
     if (data.type === 'push') {
+      // 受信直後に ACK → サーバーの pending を即削除（二重送信防止）
+      sendAck();
       showToast('📨 受信 → Gemini送信中...', 'warning');
       const ok = setGeminiInput(data.text);
       if (ok) {
@@ -113,6 +127,13 @@
     if (data.type === 'script_updated') {
       showToast('🔄 スクリプト更新 → リロード', 'warning');
       setTimeout(() => location.reload(), 1000);
+    }
+    if (data.type === 'close_tab') {
+      showToast('🗑️ 重複タブを閉じます', 'warning');
+      setTimeout(() => {
+        window.open('', '_self');
+        window.close();
+      }, 500);
     }
   }
 
@@ -147,6 +168,9 @@
   startLongPoll();
   checkPendingOnLoad();
 
+  // 非アクティブタブでも60秒ごとに pending をチェック
+  setInterval(checkPendingOnLoad, 60000);
+
   // ---- ページロード時に未処理 pending を自動送信 ----
   function checkPendingOnLoad() {
     // ページが完全に読み込まれるまで少し待つ
@@ -162,6 +186,7 @@
             if (d.ts <= lastTs) return;
             sessionStorage.setItem('lastPushTs', String(d.ts));
             showToast('📨 pending メッセージ → 送信中...', 'warning');
+            sendAck(); // 受信直後に ACK（二重送信防止）
             const ok = setGeminiInput(d.text);
             if (ok) {
               waitForSendButton(3000).then(btn => {
@@ -170,7 +195,7 @@
                   showToast('🚀 Gemini送信完了', 'success');
                   watchForGeminiResponse();
                 }
-                // ack でサーバーの pending を削除
+                // ack は sendAck() で既に送信済み（互換のため残す）
                 GM_xmlhttpRequest({ method: 'POST', url: SERVER_URL + '/ack',
                   headers: { 'Content-Type': 'application/json' },
                   data: '{}', onload: () => {} });

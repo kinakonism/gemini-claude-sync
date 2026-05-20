@@ -3,7 +3,7 @@ import http from 'http';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
-import { spawn, execSync } from 'child_process';
+import { spawn, execSync } from 'child_process'; // spawn: Claude起動用, execSync: osascript通知用
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PORT = 3000;
@@ -128,6 +128,21 @@ const server = http.createServer((req, res) => {
 
   // 【イベントストリーム】Tampermonkeyがロングポーリングで受信
   if (req.method === 'GET' && req.url === '/events') {
+    // 新規接続時に pending push があれば即座に返す
+    // （バックグラウンドタブでも XHR の onload は発火するため、
+    //   25秒ごとの heartbeat 再接続のたびに確実に配信される）
+    if (fs.existsSync(PUSH_FILE)) {
+      try {
+        const raw = JSON.parse(fs.readFileSync(PUSH_FILE, 'utf8'));
+        // 配信と同時にファイル削除（Tampermonkey の ACK 待ちでループしない）
+        fs.unlinkSync(PUSH_FILE);
+        log('[Events] 新規接続 → pending push を即配信（自動ACK）');
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ type: 'push', text: raw.text, ts: raw.ts }));
+        return;
+      } catch {}
+    }
+
     const client = { res, sent: false };
     client.timer = setTimeout(() => {
       if (!client.sent) {
@@ -193,6 +208,9 @@ const server = http.createServer((req, res) => {
         fs.writeFileSync(PUSH_FILE, JSON.stringify({ text: data.text, ts }), 'utf8');
         broadcastEvent({ type: 'push', text: data.text, ts });
         log('[Push] Geminiへ送信:\n' + data.text.slice(0, 100));
+        // Chrome をフォアグラウンドに → バックグラウンドタブのJS throttling を解除
+        const ac = spawn('osascript', ['-e', 'tell application "Google Chrome" to activate'], { detached: true, stdio: 'ignore' });
+        ac.unref();
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ status: 'ok', ts }));
       } catch { res.writeHead(400).end(); }
@@ -205,6 +223,7 @@ const server = http.createServer((req, res) => {
       if (fs.existsSync(PUSH_FILE)) {
         const raw = fs.readFileSync(PUSH_FILE, 'utf8');
         const data = JSON.parse(raw);
+        log('[Pending] Tampermonkey が /pending にアクセス → pending あり');
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ pending: true, text: data.text, ts: data.ts }));
       } else {
@@ -218,12 +237,20 @@ const server = http.createServer((req, res) => {
   else if (req.method === 'POST' && req.url === '/ack') {
     try {
       if (fs.existsSync(PUSH_FILE)) fs.unlinkSync(PUSH_FILE);
+      log('[ACK] Tampermonkey が /ack → pending 削除完了');
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ status: 'ok' }));
     } catch { res.writeHead(500).end(); }
   }
 
   // 【スクリプト配信】mtimeをバージョンとして差し込んで返す
+  // 【タブ閉じ】接続中の全Tampermonkeyタブに close_tab イベントを送信
+  else if (req.method === 'POST' && req.url === '/close-tabs') {
+    broadcastEvent({ type: 'close_tab' });
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ status: 'ok', clients: longPollClients.length }));
+  }
+
   else if (req.method === 'GET' && (req.url === '/tampermonkey_script.js' || req.url === '/tampermonkey_script.user.js')) {
     let content = fs.readFileSync(scriptPath, 'utf8');
     const version = Math.floor(fs.statSync(scriptPath).mtimeMs / 1000);
