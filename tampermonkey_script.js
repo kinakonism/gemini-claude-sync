@@ -7,6 +7,8 @@
 // @match        https://gemini.google.com/*
 // @grant        GM_xmlhttpRequest
 // @connect      localhost
+// @updateURL    http://localhost:3000/tampermonkey_script.js
+// @downloadURL  http://localhost:3000/tampermonkey_script.js
 // ==/UserScript==
 
 (function () {

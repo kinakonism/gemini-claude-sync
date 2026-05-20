@@ -93,6 +93,16 @@ const server = http.createServer((req, res) => {
     res.end(JSON.stringify({ status }));
   }
 
+  // 【スクリプト配信】ファイルのmtimeをバージョンとして差し込んで返す
+  else if (req.method === 'GET' && req.url === '/tampermonkey_script.js') {
+    const scriptPath = join(__dirname, 'tampermonkey_script.js');
+    let content = fs.readFileSync(scriptPath, 'utf8');
+    const version = Math.floor(fs.statSync(scriptPath).mtimeMs / 1000);
+    content = content.replace(/(@version\s+)[\d.]+/, `$1${version}`);
+    res.writeHead(200, { 'Content-Type': 'application/javascript; charset=utf-8' });
+    res.end(content);
+  }
+
   else {
     res.writeHead(404).end();
   }
