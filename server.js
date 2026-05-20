@@ -32,7 +32,7 @@ function runClaude(prompt) {
     fs.writeFileSync(STATUS_FILE, 'done', 'utf8');
     if (code === 0 && output.trim()) {
       fs.writeFileSync(CLAUDE_TO_GEMINI_FILE, output, 'utf8');
-      console.log('[Claude] 完了。claude_out.md に書き出しました。');
+      console.log('[Claude] 完了:\n' + '─'.repeat(40) + '\n' + output.trim() + '\n' + '─'.repeat(40));
     } else {
       console.error(`[Claude] 終了コード: ${code}`);
     }
@@ -99,7 +99,8 @@ const server = http.createServer((req, res) => {
     let content = fs.readFileSync(scriptPath, 'utf8');
     const version = Math.floor(fs.statSync(scriptPath).mtimeMs / 1000);
     content = content.replace(/(@version\s+)[\d.]+/, `$1${version}`);
-    res.writeHead(200, { 'Content-Type': 'application/javascript; charset=utf-8' });
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.writeHead(200, { 'Content-Type': 'text/javascript; charset=utf-8' });
     res.end(content);
   }
 
