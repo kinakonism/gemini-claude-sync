@@ -94,7 +94,7 @@ const server = http.createServer((req, res) => {
   }
 
   // 【スクリプト配信】ファイルのmtimeをバージョンとして差し込んで返す
-  else if (req.method === 'GET' && req.url === '/tampermonkey_script.js') {
+  else if (req.method === 'GET' && (req.url === '/tampermonkey_script.js' || req.url === '/tampermonkey_script.user.js')) {
     const scriptPath = join(__dirname, 'tampermonkey_script.js');
     let content = fs.readFileSync(scriptPath, 'utf8');
     const version = Math.floor(fs.statSync(scriptPath).mtimeMs / 1000);
