@@ -16,7 +16,8 @@ function runClaude(prompt) {
   fs.writeFileSync(STATUS_FILE, 'running', 'utf8');
   console.log('[Claude] 実行開始...');
 
-  const claude = spawn('claude', [
+  const claudeBin = process.env.CLAUDE_BIN || '/Users/masato/.nvm/versions/node/v22.17.0/bin/claude';
+  const claude = spawn(claudeBin, [
     '-p', prompt,
     '--allowedTools', 'Bash,Read,Write,Edit,Glob,Grep',
     '--dangerously-skip-permissions',
@@ -28,6 +29,10 @@ function runClaude(prompt) {
   let output = '';
   claude.stdout.on('data', (data) => { output += data.toString(); });
   claude.stderr.on('data', (data) => { console.error('[Claude stderr]', data.toString()); });
+  claude.on('error', (err) => {
+    fs.writeFileSync(STATUS_FILE, 'done', 'utf8');
+    console.error('[Claude] 起動失敗:', err.message);
+  });
 
   claude.on('close', (code) => {
     fs.writeFileSync(STATUS_FILE, 'done', 'utf8');
