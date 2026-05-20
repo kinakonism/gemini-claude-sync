@@ -145,6 +145,43 @@
   }
 
   startLongPoll();
+  checkPendingOnLoad();
+
+  // ---- ページロード時に未処理 pending を自動送信 ----
+  function checkPendingOnLoad() {
+    // ページが完全に読み込まれるまで少し待つ
+    setTimeout(() => {
+      GM_xmlhttpRequest({
+        method: 'GET', url: SERVER_URL + '/pending',
+        onload: (res) => {
+          try {
+            const d = JSON.parse(res.responseText);
+            if (!d.pending) return;
+            // 既にこのセッションで処理済みなら skip
+            const lastTs = parseInt(sessionStorage.getItem('lastPushTs') || '0', 10);
+            if (d.ts <= lastTs) return;
+            sessionStorage.setItem('lastPushTs', String(d.ts));
+            showToast('📨 pending メッセージ → 送信中...', 'warning');
+            const ok = setGeminiInput(d.text);
+            if (ok) {
+              waitForSendButton(3000).then(btn => {
+                if (btn) {
+                  btn.click();
+                  showToast('🚀 Gemini送信完了', 'success');
+                  watchForGeminiResponse();
+                }
+                // ack でサーバーの pending を削除
+                GM_xmlhttpRequest({ method: 'POST', url: SERVER_URL + '/ack',
+                  headers: { 'Content-Type': 'application/json' },
+                  data: '{}', onload: () => {} });
+              });
+            }
+          } catch {}
+        },
+        onerror: () => {},
+      });
+    }, 2500);
+  }
 
   // ---- Geminiの回答を監視してサーバーに送信 ----
   function watchForGeminiResponse() {

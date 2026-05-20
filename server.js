@@ -182,20 +182,45 @@ const server = http.createServer((req, res) => {
     res.end(JSON.stringify({ status }));
   }
 
-  // 【ターミナル → Gemini】プッシュ → ロングポーリングで即配信
+  // 【ターミナル → Gemini】プッシュ → ロングポーリングで即配信 + pending保存
   else if (req.method === 'POST' && req.url === '/push') {
     let body = '';
     req.on('data', chunk => { body += chunk.toString(); });
     req.on('end', () => {
       try {
         const data = JSON.parse(body);
-        fs.writeFileSync(PUSH_FILE, data.text, 'utf8');
-        broadcastEvent({ type: 'push', text: data.text });
+        const ts = Date.now();
+        fs.writeFileSync(PUSH_FILE, JSON.stringify({ text: data.text, ts }), 'utf8');
+        broadcastEvent({ type: 'push', text: data.text, ts });
         log('[Push] Geminiへ送信:\n' + data.text.slice(0, 100));
         res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ status: 'ok' }));
+        res.end(JSON.stringify({ status: 'ok', ts }));
       } catch { res.writeHead(400).end(); }
     });
+  }
+
+  // 【ページロード時確認】未処理の pending push を返す
+  else if (req.method === 'GET' && req.url === '/pending') {
+    try {
+      if (fs.existsSync(PUSH_FILE)) {
+        const raw = fs.readFileSync(PUSH_FILE, 'utf8');
+        const data = JSON.parse(raw);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ pending: true, text: data.text, ts: data.ts }));
+      } else {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ pending: false }));
+      }
+    } catch { res.writeHead(500).end(); }
+  }
+
+  // 【処理済み確認】pending を削除（Tampermonkey が送信完了後に呼ぶ）
+  else if (req.method === 'POST' && req.url === '/ack') {
+    try {
+      if (fs.existsSync(PUSH_FILE)) fs.unlinkSync(PUSH_FILE);
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ status: 'ok' }));
+    } catch { res.writeHead(500).end(); }
   }
 
   // 【スクリプト配信】mtimeをバージョンとして差し込んで返す
