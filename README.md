@@ -144,7 +144,7 @@ cat src/main.py | ~/developer/gemini-claude-sync/push.sh -c
 | `tampermonkey_script.js` | Gemini画面にボタンを追加するブラウザスクリプト |
 | `push.sh` | ターミナルからGeminiにテキストを送るCLIスクリプト |
 | `package.json` | ESモジュール設定 |
-| `com.gemini-claude-sync.plist` | macOS launchd 自動起動設定（要パス書き換え） |
+| `com.gemini-claude-sync.plist.example` | macOS launchd 自動起動設定テンプレート（パス書き換え後に `.plist` として使用） |
 | `server.log` | サーバーログ（1MB超でserver.log.oldにローテーション、gitignore済み） |
 | `gemini_ctx.md` | 同期ファイル・自動生成（gitignore済み） |
 | `claude_out.md` | 同期ファイル・自動生成（gitignore済み） |

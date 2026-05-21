@@ -6,3 +6,4 @@ server.log
 server.log.old
 .claude/settings.local.json
 node_modules/
+com.gemini-claude-sync.plist

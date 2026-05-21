@@ -63,7 +63,7 @@ function runClaude(prompt) {
   fs.writeFileSync(STATUS_FILE, 'running', 'utf8');
   log('[Claude] 実行開始...');
 
-  const claudeBin = process.env.CLAUDE_BIN || '/Users/masato/.nvm/versions/node/v22.17.0/bin/claude';
+  const claudeBin = process.env.CLAUDE_BIN || 'claude';
   const claude = spawn(claudeBin, [
     '-p', prompt,
     '--allowedTools', 'Bash,Read,Write,Edit,Glob,Grep',
