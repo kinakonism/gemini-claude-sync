@@ -15,6 +15,20 @@ const LOG_FILE = join(__dirname, 'server.log');
 const LOG_OLD_FILE = join(__dirname, 'server.log.old');
 const MAX_LOG_BYTES = 1024 * 1024; // 1MB
 const CLAUDE_TIMEOUT_MS = 5 * 60 * 1000; // 5分
+const WAIT_TIMEOUT_MS = 3 * 60 * 1000;   // /wait のタイムアウト
+const RESPONSE_BUFFER_TTL_MS = 60 * 1000; // /wait より先に応答が届いた時の保持時間
+
+// ---- フロー状態（push.shの待機 / fast vs refine切替） ----
+// activeFlow: 直近のpush.shの状態。POST / 受信時にこれを見てモードを切り替える。
+// responseBuffer: /wait より先に応答が届いた場合の取りこぼし防止（ts → {text, expiry}）。
+// activeWaiter: /wait の長期コネクションを保持。
+let activeFlow = null;
+let activeWaiter = null;
+const responseBuffer = new Map();
+setInterval(() => {
+  const now = Date.now();
+  for (const [ts, v] of responseBuffer) if (v.expiry < now) responseBuffer.delete(ts);
+}, 30_000).unref();
 
 // ---- ログ（1MBでローテーション） ----
 function log(...args) {
@@ -53,22 +67,48 @@ function broadcastEvent(data) {
 }
 
 // ---- Claude実行 ----
-function runClaude(prompt) {
+// Gemini本文を受け取ったら、Claudeに「claude_out.md へ応答本文を書く」よう明示指示する。
+// stdoutはあくまでメタログとして扱い、Gemini に返す本文はファイルから読む。
+const SYSTEM_INSTRUCTION = [
+  '以下はWeb版Geminiから受信したメッセージです。これに対する応答を作成してください。',
+  '',
+  '【厳守事項】',
+  '- 応答の本文（Geminiにそのまま渡される内容）は `claude_out.md` に Write ツールで書き出してください。',
+  '- 「応答を書き込みました」のようなメタ要約は不要です。本文だけをファイルに保存してください。',
+  '- stdout には簡潔な完了報告（1〜2行）のみ出力してください（本文を二重に出力しないこと）。',
+  '- 本文は Markdown 形式。前置きや締めの定型文は省き、実質的な内容のみ。',
+  '',
+  '---',
+  '',
+].join('\n');
+
+function buildPrompt(geminiText) {
+  return SYSTEM_INSTRUCTION + geminiText;
+}
+
+function runClaude(geminiText, onDone) {
+  const finish = (text, status) => { if (typeof onDone === 'function') onDone(text || '', status || 'done'); };
   const currentStatus = fs.existsSync(STATUS_FILE) ? fs.readFileSync(STATUS_FILE, 'utf8') : 'idle';
   if (currentStatus === 'running') {
     log('[Claude] 既に実行中のため無視します');
     broadcastEvent({ type: 'claude_done', status: 'busy', text: '' });
+    finish('', 'busy');
     return;
   }
   fs.writeFileSync(STATUS_FILE, 'running', 'utf8');
   log('[Claude] 実行開始...');
 
+  // claude_out.md の更新検知用に実行前 mtime を記録
+  const beforeMtimeMs = fs.existsSync(CLAUDE_TO_GEMINI_FILE)
+    ? fs.statSync(CLAUDE_TO_GEMINI_FILE).mtimeMs
+    : 0;
+
   const claudeBin = process.env.CLAUDE_BIN || 'claude';
   const claude = spawn(claudeBin, [
-    '-p', prompt,
+    '-p', buildPrompt(geminiText),
     '--allowedTools', 'Bash,Read,Write,Edit,Glob,Grep',
     '--dangerously-skip-permissions',
-  ], { env: process.env, cwd: __dirname });
+  ], { env: process.env, cwd: __dirname, stdio: ['ignore', 'pipe', 'pipe'] });
 
   const timer = setTimeout(() => {
     claude.kill();
@@ -76,12 +116,13 @@ function runClaude(prompt) {
     log('[Claude] タイムアウト（5分）で強制終了しました');
     notify('Claude Code', 'タイムアウト（5分）で終了しました');
     broadcastEvent({ type: 'claude_done', status: 'timeout', text: '' });
+    finish('', 'timeout');
   }, CLAUDE_TIMEOUT_MS);
 
-  let output = '';
+  let stdoutBuf = '';
   claude.stdout.on('data', (data) => {
     const chunk = data.toString();
-    output += chunk;
+    stdoutBuf += chunk;
     process.stdout.write(chunk);
     fs.appendFileSync(LOG_FILE, chunk);
   });
@@ -91,33 +132,81 @@ function runClaude(prompt) {
     fs.writeFileSync(STATUS_FILE, 'done', 'utf8');
     log('[Claude] 起動失敗:', err.message);
     broadcastEvent({ type: 'claude_done', status: 'error', text: '' });
+    finish('', 'error');
   });
   claude.on('close', (code) => {
     clearTimeout(timer);
     fs.writeFileSync(STATUS_FILE, 'done', 'utf8');
-    const result = output.trim();
-    if (code === 0 && result) {
-      fs.writeFileSync(CLAUDE_TO_GEMINI_FILE, output, 'utf8');
-      log('\n' + '─'.repeat(40));
-      notify('Claude Code', '完了しました');
-      broadcastEvent({ type: 'claude_done', status: 'done', text: output });
-    } else {
+    if (code !== 0) {
       log(`[Claude] 終了コード: ${code}`);
       broadcastEvent({ type: 'claude_done', status: 'error', text: '' });
+      finish('', 'error');
+      return;
+    }
+
+    // Claudeが claude_out.md を更新したかチェック
+    const afterMtimeMs = fs.existsSync(CLAUDE_TO_GEMINI_FILE)
+      ? fs.statSync(CLAUDE_TO_GEMINI_FILE).mtimeMs
+      : 0;
+    const fileUpdated = afterMtimeMs > beforeMtimeMs;
+
+    let bodyForGemini = '';
+    if (fileUpdated) {
+      bodyForGemini = fs.readFileSync(CLAUDE_TO_GEMINI_FILE, 'utf8').trim();
+      log(`[Claude] claude_out.md 更新を検知 (${bodyForGemini.length} chars)`);
+    } else {
+      // フォールバック: Claudeがファイル書き込みを怠った場合、stdoutを採用
+      bodyForGemini = stdoutBuf.trim();
+      if (bodyForGemini) {
+        fs.writeFileSync(CLAUDE_TO_GEMINI_FILE, bodyForGemini, 'utf8');
+        log(`[Claude] claude_out.md 未更新 → stdout(${bodyForGemini.length} chars)をフォールバック採用`);
+      }
+    }
+
+    log('\n' + '─'.repeat(40));
+    if (bodyForGemini) {
+      notify('Claude Code', '完了しました');
+      broadcastEvent({ type: 'claude_done', status: 'done', text: bodyForGemini });
+      finish(bodyForGemini, 'done');
+    } else {
+      log('[Claude] 本文が空のため Gemini への配信をスキップ');
+      broadcastEvent({ type: 'claude_done', status: 'error', text: '' });
+      finish('', 'error');
     }
   });
 }
 
-// ---- tampermonkey_script.js の変更を監視 ----
+// ---- 応答の解決（fast/refineどちらでもここを通す） ----
+function deliverResponse(text) {
+  const ts = activeFlow ? activeFlow.ts : null;
+  if (activeWaiter && (!ts || activeWaiter.ts === ts) && !activeWaiter.sent) {
+    activeWaiter.sent = true;
+    clearTimeout(activeWaiter.timer);
+    activeWaiter.res.writeHead(200, { 'Content-Type': 'application/json' });
+    activeWaiter.res.end(JSON.stringify({ status: 'ok', text }));
+    activeWaiter = null;
+    log(`[Wait] push.sh へ応答配信 (${text.length} chars)`);
+  } else if (ts) {
+    // /wait より先に到着 → バッファに保持
+    responseBuffer.set(ts, { text, expiry: Date.now() + RESPONSE_BUFFER_TTL_MS });
+    log(`[Wait] バッファに保持 ts=${ts} (${text.length} chars)`);
+  }
+  activeFlow = null;
+}
+
+// ---- スクリプト変更の監視（ローダー本体 / runtime両方） ----
 const scriptPath = join(__dirname, 'tampermonkey_script.js');
+const runtimePath = join(__dirname, 'runtime.js');
 let reloadTimer = null;
-fs.watch(scriptPath, () => {
+function scheduleReload(label) {
   clearTimeout(reloadTimer);
   reloadTimer = setTimeout(() => {
-    log('[Watch] tampermonkey_script.js が更新されました。クライアントに通知します。');
+    log(`[Watch] ${label} が更新されました。クライアントに通知します。`);
     broadcastEvent({ type: 'script_updated' });
   }, 300);
-});
+}
+fs.watch(scriptPath, () => scheduleReload('tampermonkey_script.js'));
+if (fs.existsSync(runtimePath)) fs.watch(runtimePath, () => scheduleReload('runtime.js'));
 
 // ---- HTTPサーバー ----
 const server = http.createServer((req, res) => {
@@ -162,19 +251,37 @@ const server = http.createServer((req, res) => {
     });
   }
 
-  // 【Gemini ➔ Claude】受信 → 即200返却 → バックグラウンドでClaude実行
+  // 【Gemini ➔ サーバー】受信 → 即200返却 → モードに応じて処理
+  //   fast   : Geminiの本文をそのまま push.sh へ返す（Claudeを呼ばない・最速）
+  //   refine : Claudeで精製してGeminiへ戻す（従来動作）
   else if (req.method === 'POST' && req.url === '/') {
     let body = '';
     req.on('data', chunk => { body += chunk.toString(); });
     req.on('end', () => {
       try {
         const data = JSON.parse(body);
-        const content = `### Gemini Context (${new Date().toLocaleString()})\n\n${data.text}\n`;
+        // Tampermonkeyが付けるプレフィクス & Gemini UI由来のラベルを剥がす
+        const geminiText = (data.text || '')
+          .replace(/^## Geminiの回答:\s*/i, '')
+          .replace(/^Gemini\s*の?回答\s*\n+/i, '')
+          .replace(/^Gemini'?s?\s*answer\s*\n+/i, '')
+          .trim();
+        const content = `### Gemini Context (${new Date().toLocaleString()})\n\n${geminiText}\n`;
         fs.writeFileSync(GEMINI_TO_CLAUDE_FILE, content, 'utf8');
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ status: 'ok' }));
-        runClaude(data.text);
-        log('[Success] Geminiの指示を受信。Claudeを起動しました。');
+
+        const mode = (activeFlow && activeFlow.mode) || 'refine'; // 手動ボタン経由はrefine
+        if (mode === 'fast') {
+          // Geminiの本文を直接 claude_out.md にも保存（手動「📥」ボタンとの整合）
+          fs.writeFileSync(CLAUDE_TO_GEMINI_FILE, geminiText, 'utf8');
+          log(`[Fast] Geminiの回答を直接配信 (${geminiText.length} chars)`);
+          // fast mode では Tampermonkey に "claude_done" を送らない（自動入力ループを避ける）
+          deliverResponse(geminiText);
+        } else {
+          log('[Refine] Geminiの指示を受信。Claudeを起動します。');
+          runClaude(geminiText, (text) => deliverResponse(text));
+        }
       } catch { res.writeHead(400).end(); }
     });
   }
@@ -198,6 +305,7 @@ const server = http.createServer((req, res) => {
   }
 
   // 【ターミナル → Gemini】プッシュ → ロングポーリングで即配信 + pending保存
+  // body.mode = 'fast' (デフォルト、Claudeスキップ) | 'refine' (Claude精製)
   else if (req.method === 'POST' && req.url === '/push') {
     let body = '';
     req.on('data', chunk => { body += chunk.toString(); });
@@ -205,16 +313,55 @@ const server = http.createServer((req, res) => {
       try {
         const data = JSON.parse(body);
         const ts = Date.now();
+        const mode = data.mode === 'refine' ? 'refine' : 'fast';
+        activeFlow = { mode, ts };
         fs.writeFileSync(PUSH_FILE, JSON.stringify({ text: data.text, ts }), 'utf8');
         broadcastEvent({ type: 'push', text: data.text, ts });
-        log('[Push] Geminiへ送信:\n' + data.text.slice(0, 100));
+        log(`[Push] mode=${mode} Geminiへ送信:\n` + data.text.slice(0, 100));
         // Chrome をフォアグラウンドに → バックグラウンドタブのJS throttling を解除
         const ac = spawn('osascript', ['-e', 'tell application "Google Chrome" to activate'], { detached: true, stdio: 'ignore' });
         ac.unref();
         res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ status: 'ok', ts }));
+        res.end(JSON.stringify({ status: 'ok', ts, mode }));
       } catch { res.writeHead(400).end(); }
     });
+  }
+
+  // 【push.sh のブロッキング待機】GET /wait?ts=<ts> → 応答が出るまで保留
+  else if (req.method === 'GET' && req.url.startsWith('/wait')) {
+    const m = req.url.match(/[?&]ts=(\d+)/);
+    const ts = m ? parseInt(m[1], 10) : 0;
+    // バッファに既に応答があれば即返却
+    const buffered = responseBuffer.get(ts);
+    if (buffered) {
+      responseBuffer.delete(ts);
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ status: 'ok', text: buffered.text }));
+      return;
+    }
+    // 既存のwaiterは破棄（最新のpush.shだけが待つ）
+    if (activeWaiter && !activeWaiter.sent) {
+      activeWaiter.sent = true;
+      clearTimeout(activeWaiter.timer);
+      try { activeWaiter.res.writeHead(200).end(JSON.stringify({ status: 'superseded', text: '' })); } catch {}
+    }
+    const waiter = { res, ts, sent: false };
+    waiter.timer = setTimeout(() => {
+      if (!waiter.sent) {
+        waiter.sent = true;
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ status: 'timeout', text: '' }));
+        if (activeWaiter === waiter) activeWaiter = null;
+      }
+    }, WAIT_TIMEOUT_MS);
+    req.on('close', () => {
+      if (!waiter.sent) {
+        waiter.sent = true;
+        clearTimeout(waiter.timer);
+        if (activeWaiter === waiter) activeWaiter = null;
+      }
+    });
+    activeWaiter = waiter;
   }
 
   // 【ページロード時確認】未処理の pending push を返す
@@ -258,6 +405,33 @@ const server = http.createServer((req, res) => {
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.writeHead(200, { 'Content-Type': 'text/javascript; charset=utf-8' });
     res.end(content);
+  }
+
+  // 【診断】runtime.jsが起動したことを報告
+  else if (req.method === 'POST' && req.url === '/hello') {
+    let body = '';
+    req.on('data', c => { body += c.toString(); });
+    req.on('end', () => {
+      try {
+        const d = JSON.parse(body || '{}');
+        log(`[Hello] runtime online: version=${d.version || '?'} url=${d.url || '?'}`);
+      } catch {}
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end('{"ok":true}');
+    });
+  }
+
+  // 【runtime配信】Tampermonkeyローダーが動的取得する。no-cacheで毎回最新を返す。
+  else if (req.method === 'GET' && req.url.startsWith('/runtime.js')) {
+    try {
+      const content = fs.readFileSync(runtimePath, 'utf8');
+      res.setHeader('Access-Control-Allow-Origin', '*');
+      res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+      res.writeHead(200, { 'Content-Type': 'text/javascript; charset=utf-8' });
+      res.end(content);
+    } catch (e) {
+      res.writeHead(500).end(String(e));
+    }
   }
 
   else { res.writeHead(404).end(); }
